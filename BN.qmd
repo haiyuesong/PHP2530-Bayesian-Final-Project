@@ -1,0 +1,202 @@
+---
+title: "Bayesian Networks for Estimating Brain Effective Connectivity in Resting-State fMRI Data"
+subtitle: "PHP2530 Final Project"
+format: pdf
+editor: visual
+---
+# Libraries
+
+```{r}
+setwd("~/Bayesian Final")
+library(data.table)
+library(bnlearn)
+library(Rgraphviz)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(igraph)
+library(psych)
+library(parallel)
+library(ComplexHeatmap)
+library(circlize)
+library(coda)
+source("helper_function.R")
+```
+
+# Loading Pre-processed Data and Normalization
+
+```{r}
+aal2_txt <- read.table("aal2_ROI_names.txt") # ROIs' names, AAL2 Atlas
+
+# a subject in AD
+AD <- fread("smoothed_ts_AD.csv") %>% select(-V1)
+colnames(AD) <- aal2_txt$V2
+scaled_AD<- as.data.frame(scale(AD))
+
+# a subject in CN
+CN <- fread("smoothed_ts_CN.csv") %>% select(-V1)
+colnames(CN) <- aal2_txt$V2
+scaled_CN<- as.data.frame(scale(CN))
+```
+
+# Dimension Reduction
+
+## Correlation Coefficents and Fisher's Z Transformation
+```{r}
+# AD
+cor_AD <- cor(scaled_AD)
+fisherz_AD <- fisherz(cor_AD)
+std_err <- 1/sqrt(976-3)
+standard_fisherz_AD <- fisherz_AD/std_err
+
+# CN
+cor_CN <- cor(scaled_CN)
+fisherz_CN <- fisherz(cor_CN)
+std_err <- 1/sqrt(976-3)
+standard_fisherz_CN <- fisherz_CN/std_err
+```
+
+## Visualization
+```{r}
+# heatmap for correlation coefficients for AD
+hm_fc_AD <- Heatmap(cor_AD,
+               column_title = "Correlation Coeffient Map for a Subject in AD Group",
+               name = "Correlation Coefficients", # Title of the heatmap
+               col = colorRamp2(c(0, 0.5, 1), c("blue", "white", "red")), # Color gradient
+               row_names_side = "left", # Position of row names
+               column_names_side = "bottom", # Position of column names
+               show_row_dend = FALSE, 
+               show_column_dend = FALSE,
+               column_title_gp = gpar(fontsize = 8, fontface = "bold"),
+               row_names_gp = gpar(fontsize = 3),
+               column_names_gp = gpar(fontsize = 3),
+               heatmap_legend_param = list(direction = "horizontal"),
+               cluster_rows = FALSE,
+               cluster_columns = FALSE
+)
+draw(hm_fc_AD, heatmap_legend_side = "bottom")
+```
+
+```{r}
+# heatmap for correlation coefficients for AD
+hm_fc_CN <- Heatmap(cor_CN,
+               column_title = "Correlation Coeffient Map for a Subject in CN Group",
+               name = "Correlation Coefficients", # Title of the heatmap
+               col = colorRamp2(c(0, 0.5, 1), c("blue", "white", "red")), # Color gradient
+               row_names_side = "left", # Position of row names
+               column_names_side = "bottom", # Position of column names
+               show_row_dend = FALSE, 
+               show_column_dend = FALSE,
+               column_title_gp = gpar(fontsize = 8, fontface = "bold"),
+               row_names_gp = gpar(fontsize = 3),
+               column_names_gp = gpar(fontsize = 3),
+               heatmap_legend_param = list(direction = "horizontal"),
+               cluster_rows = FALSE,
+               cluster_columns = FALSE
+)
+draw(hm_fc_CN, heatmap_legend_side = "bottom")
+```
+
+
+## Find Regions Highly-correlated with Hippocampus Regions
+```{r}
+# find highly-correlated regions for AD
+# threshold 0.7
+high_corr_AD_0.7 <- matrix(nrow=120,ncol=120)
+for(roi1 in 1:119){
+  sec_index <- which(mclapply((roi1+1):120,function(roi2) high_corr(roi1,roi2, standard_fisherz_AD,threshold=0.7,std_err=std_err))<=0.05)
+  high_corr_AD_0.7[roi1,sec_index] <- TRUE
+}
+# union of all high-correlated regions of hippocampus
+cond_roi <- union(union(union(union(which(high_corr_AD_0.7[,41]),which(high_corr_AD_0.7[,42])),which(high_corr_AD_0.7[,43])),which(high_corr_AD_0.7[,44])),41:44)
+```
+
+
+```{r}
+# find highly-correlated regions for CN
+# threshold 0.8
+high_corr_CN_0.8 <- matrix(nrow=120,ncol=120)
+for(roi1 in 1:119){
+  sec_index <- which(mclapply((roi1+1):120,function(roi2) high_corr(roi1,roi2, standard_fisherz_CN,threshold=0.8,std_err=std_err))<=0.05)
+  high_corr_CN_0.8[roi1,sec_index] <- TRUE
+}
+# union of all high-correlated regions of hippocampus - CN
+cond_roi_CN <- union(union(union(union(which(high_corr_CN_0.8[,41]),which(high_corr_CN_0.8[,42])),which(high_corr_CN_0.8[,43])),which(high_corr_CN_0.8[,44])),41:44)
+```
+
+
+
+# Bayesian Network
+```{r}
+set.seed(1)
+iterations <- 1000
+burn_in <- 200
+# Define the initial structure
+nodes_AD <- colnames(scaled_AD[,cond_roi_CN])
+initial_structure_AD <- random.graph(nodes_AD, method = "ic-dag", max.in.degree = 2) # uniform - flat prior
+
+bn_model_AD <- metropolis_hastings_bn(scaled_AD[,cond_roi_CN], initial_structure_AD,iterations)
+
+# Plot the resulting Bayesian Network
+graphviz.plot(bn_model_AD$model,fontsize = 15)
+```
+
+```{r}
+loglik_scores_AD <- bn_model_AD$loglik_scores
+
+# Plot the trace plot
+plot(loglik_scores_AD, type = "l", main = "Traceplot of Log-Likelihood Scores (AD)", xlab = "Iteration", ylab = "Log-Likelihood Score")
+plot(loglik_scores_AD[(burn_in  + 1):iterations], type = "l", main = "Traceplot of Log-Likelihood Scores (AD), Post Burn-In Period", xlab = "Iteration", ylab = "Log-Likelihood Score",ylim=c(-8440,-8430))
+```
+
+```{r}
+set.seed(1)
+# Run multiple chains
+num_chains <- 3
+chains_AD <- run_multiple_chains(scaled_AD[,cond_roi_CN], nodes_AD, iterations, num_chains, burn_in)
+
+# traceplot
+traceplot(chains_AD,main="Trace of Log Likelihood (AD)",ylim=c(-8440,-8425))
+# Gelman-Rubin diagnostic
+gelman_diag_AD <- gelman.diag(chains_AD)
+print(gelman_diag_AD)
+# gelman.plot(chains_AD)
+```
+
+
+```{r}
+set.seed(1)
+# Define the initial structure
+nodes_CN <- colnames(scaled_AD[,cond_roi_CN])
+initial_structure_CN <- random.graph(nodes_CN, method = "ic-dag", max.in.degree = 2)
+
+bn_model_CN <- metropolis_hastings_bn(scaled_CN[,cond_roi_CN], initial_structure_CN,1000)
+
+# Plot the resulting Bayesian Network
+graphviz.plot(bn_model_CN$model,fontsize = 15)
+```
+```{r}
+loglik_scores_CN <- bn_model_CN$loglik_scores
+
+# Plot the trace plot
+plot(loglik_scores_CN, type = "l", main = "Traceplot of Log-Likelihood Scores (CN)", xlab = "Iteration", ylab = "Log-Likelihood Score")
+```
+
+```{r}
+set.seed(1)
+chains_CN <- run_multiple_chains(scaled_CN[,cond_roi_CN], nodes_CN, iterations, num_chains, burn_in=200)
+
+# traceplot
+traceplot(chains_CN,main="Trace of Log Likelihood (CN)", ylim=c(-7470,-7455))
+gelman_diag_CN <- gelman.diag(chains_CN)
+# print(gelman_diag_CN)
+# gelman.plot(chains_CN)
+```
+
+# Comparison Visulization
+```{r}
+par(mfrow = c(1, 2))
+graphviz.compare(bn_model_AD$model,bn_model_CN$model)
+```
+
+
